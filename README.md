@@ -6,6 +6,22 @@ Featuring a dual-core **FreeRTOS architecture**, **NTP real-world time synchroni
 
 ---
 
+## 📌 Example Use Cases
+
+This monitor is especially useful for vehicles that sit for long periods and are more likely to develop battery issues over time:
+
+* Monitoring a spare car that is not driven every day.
+* Tracking the battery health of an old or vintage car where the battery is often the weak point.
+* Watching any low-use vehicle that may slowly discharge while parked.
+* Monitoring other 12V-24V battery-powered equipment such as motorcycles, scooters, boats, RVs, tractors, generators, and utility vehicles.
+* Monitoring a battery while it is connected to a battery charger.
+
+ThingSpeak can also be used to trigger an alert when battery voltage drops to a level where it is time to recharge.
+
+Example live data from my car: [ThingSpeak Channel 3405145](https://thingspeak.mathworks.com/channels/3405145)
+
+---
+
 ## 🚀 Key Features
 
 * **Dual-Core Isolation (FreeRTOS):**
