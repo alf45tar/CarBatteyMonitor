@@ -40,21 +40,36 @@ Since the ESP32 ADC safe input limit is around **3.1V** (when configured with ma
 
 The divider used in this project is well suited for monitoring a **12V battery** and still leaves some headroom above the normal charging range.
 
-* **Resistor 1 ($R_1$ - High side):** $330\text{ k}\Omega$
-* **Resistor 2 ($R_2$ - Low side):** $47\text{ k}\Omega$
+* **Resistor 1 ($R_1$):** $330\text{ k}\Omega$
+* **Resistor 2 ($R_2$):** $47\text{ k}\Omega$
 * **Analog Pin:** GPIO 34 (ADC1)
 
 $$\text{Attenuation Ratio} = \frac{R_1 + R_2}{R_2} = \frac{330\text{k} + 47\text{k}}{47\text{k}} \approx 8.0212$$
 
 Maximum Measurable Voltage: $3.1\text{V} \times 8.0212 \approx 24.86\text{V}$.
 
+```
+                   GPIO 34
+                      |
+                      |
+12V -----/\/\/\/------+-----/\/\/\/----- GND
+          330k                47k
+```
+
 For a **24V battery system**, use a higher-ratio divider so the ESP32 still has safe headroom when the battery is charging. A simple alternative is:
 
-* **Resistor 1 ($R_1$ - High side):** $470\text{ k}\Omega$
-* **Resistor 2 ($R_2$ - Low side):** $47\text{ k}\Omega$
+* **Resistor 1 ($R_1$):** $470\text{ k}\Omega$
+* **Resistor 2 ($R_2$):** $47\text{ k}\Omega$
 
 This gives an attenuation ratio of about $11.00$ and raises the measurable range to roughly $34.1\text{V}$, which is a better fit for a 24V battery setup.
 
+```
+                   GPIO 34
+                      |
+                      |
+24V -----/\/\/\/------+-----/\/\/\/----- GND
+          470k                47k
+```
 ---
 
 ## 💾 Installation & Setup
