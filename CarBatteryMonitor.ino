@@ -1,17 +1,24 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <LittleFS.h>
 #include "time.h" // Built-in ESP32 Time library
 
 //====================================================
-// WIFI & THINGSPEAK CONFIGURATION
+// WIFI & CLOUD REPORTING CONFIGURATION
 //====================================================
-const char* ssid     = "";      // Replace with your WiFi SSID
-const char* password = "";      // Replace with your WiFi password
+const char* ssid     = "MyWireless";     // Replace with your WiFi SSID
+const char* password = "1234567890";     // Replace with your WiFi password
 
-const char* writeApiKey = "";   // Replace with your ThingSpeak Write API Key
-const char* channelID   = "";   // Replace with your ThingSpeak Channel ID
+const bool ENABLE_THINGSPEAK = true;     // Set true to enable ThingSpeak uploads
+const bool ENABLE_THINGSBOARD = true;    // Set true to enable ThingsBoard uploads
+
+const char* writeApiKey = "XXXXXXXXXXXXXXXX";   // Replace with your ThingSpeak Write API Key
+const char* channelID   = "0000000";            // Replace with your ThingSpeak Channel ID
 const char* server      = "http://api.thingspeak.com/channels/";
+
+const char* thingsBoardServer = "https://eu.thingsboard.cloud";  // Replace with your ThingsBoard host
+const char* thingsBoardToken  = "XXXXXXXXXXXXXXXXXXXX";          // Replace with your ThingsBoard Device Access Token
 
 //====================================================
 // NTP SERVER CONFIGURATION
@@ -48,6 +55,10 @@ void TaskSend(void *pvParameters);
 void TaskBlinkOffline(void *pvParameters);
 void handleBootButtonFlashDelete();
 bool isTimeSynchronized();
+bool sendThingSpeakBatch(const DataPoint* records, size_t numRecords);
+bool sendThingsBoardBatch(const DataPoint* records, size_t numRecords);
+String buildThingSpeakPayload(const DataPoint* records, size_t numRecords);
+String buildThingsBoardPayload(const DataPoint* records, size_t numRecords);
 
 //====================================================
 // UTILITY: GET CURRENT UNIX TIMESTAMP
@@ -99,6 +110,7 @@ String getHttpStatusMessage(int httpCode) {
         case 200: return "OK";
         case 201: return "Created";
         case 202: return "Accepted";
+        case 204: return "No Content";
         case 400: return "Bad Request";
         case 401: return "Unauthorized";
         case 403: return "Forbidden";
@@ -110,6 +122,106 @@ String getHttpStatusMessage(int httpCode) {
         case 503: return "Service Unavailable";
         default: return "Unknown Status";
     }
+}
+
+//====================================================
+// UTILITY: BUILD THINGSPEAK BULK PAYLOAD
+//====================================================
+String buildThingSpeakPayload(const DataPoint* records, size_t numRecords) {
+    String jsonPayload = "{\"write_api_key\":\"" + String(writeApiKey) + "\",\"updates\":[";
+    for (size_t i = 0; i < numRecords; i++) {
+        jsonPayload += "{\"created_at\":\"" + getISO8601Time(records[i].timestamp) + "\",";
+        jsonPayload += "\"field1\":\"" + String(records[i].voltage, 3) + "\"}";
+        if (i < numRecords - 1) jsonPayload += ",";
+    }
+    jsonPayload += "]}";
+    return jsonPayload;
+}
+
+//====================================================
+// UTILITY: BUILD THINGSBOARD TELEMETRY PAYLOAD
+//====================================================
+String buildThingsBoardPayload(const DataPoint* records, size_t numRecords) {
+    String jsonPayload = "[";
+    for (size_t i = 0; i < numRecords; i++) {
+        char timestampBuffer[24];
+        snprintf(timestampBuffer, sizeof(timestampBuffer), "%lld", (long long)records[i].timestamp * 1000LL);
+
+        jsonPayload += "{\"ts\":";
+        jsonPayload += timestampBuffer;
+        jsonPayload += ",\"values\":{\"voltage\":";
+        jsonPayload += String(records[i].voltage, 3);
+        jsonPayload += "}}";
+
+        if (i < numRecords - 1) jsonPayload += ",";
+    }
+    jsonPayload += "]";
+    return jsonPayload;
+}
+
+//====================================================
+// UTILITY: SEND THINGSPEAK BATCH
+//====================================================
+bool sendThingSpeakBatch(const DataPoint* records, size_t numRecords) {
+    if (!ENABLE_THINGSPEAK) {
+        return true;
+    }
+
+    String jsonPayload = buildThingSpeakPayload(records, numRecords);
+
+    digitalWrite(LED_BUILTIN, HIGH);
+    HTTPClient http;
+    String url = String(server) + String(channelID) + "/bulk_update.json";
+    http.begin(url);
+    http.addHeader("Content-Type", "application/json");
+
+    int httpCode = http.POST(jsonPayload);
+    String responseBody = http.getString();
+    digitalWrite(LED_BUILTIN, LOW);
+
+    Serial.print("[ThingSpeak] HTTP ");
+    Serial.print(httpCode);
+    Serial.print(" ");
+    Serial.print(getHttpStatusMessage(httpCode));
+    Serial.print(" ");
+    Serial.println(responseBody);
+
+    http.end();
+    return httpCode == 202;
+}
+
+//====================================================
+// UTILITY: SEND THINGSBOARD BATCH
+//====================================================
+bool sendThingsBoardBatch(const DataPoint* records, size_t numRecords) {
+    if (!ENABLE_THINGSBOARD) {
+        return true;
+    }
+
+    String jsonPayload = buildThingsBoardPayload(records, numRecords);
+
+    digitalWrite(LED_BUILTIN, HIGH);
+    WiFiClientSecure secureClient;
+    secureClient.setInsecure();
+
+    HTTPClient http;
+    String url = String(thingsBoardServer) + "/api/v1/" + String(thingsBoardToken) + "/telemetry";
+    http.begin(secureClient, url);
+    http.addHeader("Content-Type", "application/json");
+
+    int httpCode = http.POST(jsonPayload);
+    String responseBody = http.getString();
+    digitalWrite(LED_BUILTIN, LOW);
+
+    Serial.print("[ThingsBoard] HTTP ");
+    Serial.print(httpCode);
+    Serial.print(" ");
+    Serial.print(getHttpStatusMessage(httpCode));
+    Serial.print(" ");
+    Serial.println(responseBody);
+
+    http.end();
+    return httpCode >= 200 && httpCode < 300;
 }
 
 //====================================================
@@ -232,7 +344,7 @@ void TaskMeasure(void *pvParameters) {
 
             if (adcSamples > 0) {
                 float adcVoltage = ((float)adcAccumulator / adcSamples) / 1000.0f;
-                float inputVoltage = adcVoltage * DIVIDER_RATIO;
+                float inputVoltage = round(adcVoltage * DIVIDER_RATIO * 100) / 100.0f;
 
                 if (xQueueSend(voltageQueue, &inputVoltage, 0) != pdPASS) {
                     Serial.println("[TaskMeasure Error] Queue full!");
@@ -329,45 +441,38 @@ void TaskSend(void *pvParameters) {
                     }
                 }
 
-                Serial.println("[ThingSpeak] Sync data:");
+                Serial.println("[Storage] Sync data:");
                 for (size_t i = 0; i < numRecords; i++) {
                     Serial.print("  #");
                     Serial.print(i + 1);
                     Serial.print(" voltage=");
-                    Serial.print(syncBuffer[i].voltage, 3);
+                    Serial.print(syncBuffer[i].voltage, 2);
                     Serial.print(" V, local=");
                     Serial.print(getLocalTimeString(syncBuffer[i].timestamp));
                     Serial.print(", utc=");
                     Serial.println(getISO8601Time(syncBuffer[i].timestamp));
                 }
 
-                // Build Bulk JSON using absolute 'created_at' targets instead of 'delta_t'
-                String jsonPayload = "{\"write_api_key\":\"" + String(writeApiKey) + "\",\"updates\":[";
-                for (size_t i = 0; i < numRecords; i++) {
-                    jsonPayload += "{\"created_at\":\"" + getISO8601Time(syncBuffer[i].timestamp) + "\",";
-                    jsonPayload += "\"field1\":\"" + String(syncBuffer[i].voltage, 3) + "\"}";
-                    if (i < numRecords - 1) jsonPayload += ",";
+                bool reportingAttempted = false;
+                bool allReportsSucceeded = true;
+
+                if (ENABLE_THINGSPEAK) {
+                    reportingAttempted = true;
+                    allReportsSucceeded = sendThingSpeakBatch(syncBuffer, numRecords) && allReportsSucceeded;
                 }
-                jsonPayload += "]}";
 
-                digitalWrite(LED_BUILTIN, HIGH);
-                HTTPClient http;
-                String url = String(server) + String(channelID) + "/bulk_update.json";
-                http.begin(url);
-                http.addHeader("Content-Type", "application/json");
+                if (ENABLE_THINGSBOARD) {
+                    reportingAttempted = true;
+                    allReportsSucceeded = sendThingsBoardBatch(syncBuffer, numRecords) && allReportsSucceeded;
+                }
 
-                int httpCode = http.POST(jsonPayload);
-                String responseBody = http.getString();
-                digitalWrite(LED_BUILTIN, LOW);
+                if (!reportingAttempted) {
+                    Serial.println("[Config] No cloud reporting method is enabled. Data will stay in flash.");
+                    delete[] syncBuffer;
+                    continue;
+                }
 
-                Serial.print("[ThingSpeak] HTTP ");
-                Serial.print(httpCode);
-                Serial.print(" ");
-                Serial.print(getHttpStatusMessage(httpCode));
-                Serial.print(" ");
-                Serial.println(responseBody);
-
-                if (httpCode == 202) {
+                if (allReportsSucceeded) {
                     
                     // Cleanup handled records
                     File file = LittleFS.open(DATA_FILE, FILE_READ);
@@ -392,8 +497,7 @@ void TaskSend(void *pvParameters) {
                         Serial.println("[Flash] All clear.");
                     }
                 }
-                
-                http.end();
+
                 delete[] syncBuffer;
             }
         }

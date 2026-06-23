@@ -1,6 +1,6 @@
 # ESP32 0-24V Voltage Monitor
 
-An advanced, industrial-grade voltage monitoring system designed for the ESP32 platform. This project samples analog voltage (0-24V range) at a high frequency on a dedicated CPU core, averages the data, and securely uploads it to ThingSpeak. 
+An advanced, industrial-grade voltage monitoring system designed for the ESP32 platform. This project samples analog voltage (0-24V range) at a high frequency on a dedicated CPU core, averages the data, and securely uploads the data to ThingSpeak and/or ThingsBoard.
 
 Featuring a dual-core **FreeRTOS architecture**, **NTP real-world time synchronization**, and an offline **LittleFS flash storage buffer**, this system guarantees zero data loss and uninterrupted sampling even during total network or power outages.
 
@@ -15,7 +15,7 @@ This monitor is especially useful for vehicles that sit for long periods and are
 * Monitoring other 6V-12V-24V battery-powered equipment such as motorcycles, scooters, boats, RVs, tractors, generators, and utility vehicles.
 * Monitoring a battery while it is connected to a battery charger.
 
-ThingSpeak can also be used to trigger an alert when battery voltage drops to a level where it is time to recharge.
+ThingSpeak can also be used to trigger an alert when battery voltage drops to a level where it is time to recharge, while ThingsBoard can be used for dashboards, rules, and telemetry replay.
 
 Example live data from my spare car: [ThingSpeak Channel 3405145](https://thingspeak.mathworks.com/channels/3405145)
 
@@ -27,9 +27,9 @@ Example live data from my spare car: [ThingSpeak Channel 3405145](https://things
     * **Core 1 (`TaskMeasure`):** Dedicated entirely to strict, time-critical 10ms hardware ADC sampling.
     * **Core 0 (`TaskSend`):** Handles heavy, blocking network tasks (WiFi reconnection, NTP sync, HTTP POST payloads).
 * **Zero-Loss Persistency (LittleFS):** If WiFi is down, data points are immediately appended as raw binary structures to the ESP32's onboard Flash memory.
-* **Power-Loss Proof Time Tracking (NTP):** Uses Network Time Protocol to log data with absolute Unix Epoch timestamps. If booted offline, it maintains a precise relative timeline and auto-corrects/backdates points on ThingSpeak once the network recovers.
-* **Timezone-Aware Local Logs:** Serial output uses a real timezone rule with automatic daylight saving time adjustment, while ThingSpeak uploads remain in UTC.
-* **Smart Bulk Uploading:** Uses ThingSpeak's Bulk Update JSON API to push up to 30 accumulated points at once, bypassing free-tier rate limits and avoiding RAM exhaustion (`OOM`).
+* **Power-Loss Proof Time Tracking (NTP):** Uses Network Time Protocol to log data with absolute Unix Epoch timestamps. If booted offline, it maintains a precise relative timeline and auto-corrects/backdates points before cloud upload once the network recovers.
+* **Timezone-Aware Local Logs:** Serial output uses a real timezone rule with automatic daylight saving time adjustment, while ThingSpeak uploads remain in UTC and ThingsBoard telemetry uses client-side timestamps in milliseconds.
+* **Smart Bulk Uploading:** Uses ThingSpeak's Bulk Update JSON API and ThingsBoard's batched telemetry format to push up to 30 accumulated points at once, bypassing free-tier rate limits and avoiding RAM exhaustion.
 
 ---
 
@@ -79,10 +79,11 @@ Ensure you have the following libraries and configurations ready in your Arduino
 * **Board Manager:** ESP32 Arduino Core (v2.x or v3.x fully supported).
 * **Filesystem:** `LittleFS` (built into the ESP32 core).
 
-### 2. ThingSpeak Configuration
+### 2. ThingSpeak / ThingsBoard Configuration
 1. Log into your [ThingSpeak Account](https://thingspeak.com/).
 2. Create a new **Channel** and enable **Field 1**.
 3. Note your **Channel ID** and **Write API Key**.
+4. If you want ThingsBoard reporting, create a device in your ThingsBoard tenant and copy the device access token.
 
 ### 3. Firmware Configuration
 Open the source code file and update the configuration sections at the top:
@@ -92,9 +93,14 @@ Open the source code file and update the configuration sections at the top:
 const char* ssid     = "Your_WiFi_SSID";
 const char* password = "Your_WiFi_Password";
 
-// ThingSpeak Parameters
+// Cloud Reporting Parameters
+const bool ENABLE_THINGSPEAK = true;
+const bool ENABLE_THINGSBOARD = false;
+
 const char* writeApiKey = "YOUR_THINGSPEAK_WRITE_KEY";
 const char* channelID   = "YOUR_CHANNEL_ID_NUMBER";
+const char* thingsBoardServer = "https://thingsboard.cloud";
+const char* thingsBoardToken  = "YOUR_THINGSBOARD_DEVICE_ACCESS_TOKEN";
 
 // NTP Parameters (Adjust for your timezone rule)
 const char* timeZone = "CET-1CEST,M3.5.0/2,M10.5.0/3"; // Example: CET/CEST with automatic DST
@@ -128,7 +134,7 @@ Data travels safely across cores and into the cloud through the following pipeli
 │
 ├──► [WiFi Offline] ──► Keep buffering in LittleFS. Retry WiFi silently.
 │
-└──► [WiFi Online]  ──► Sync NTP Clock ──► Bulk Update JSON ──► [ThingSpeak Cloud]
+└──► [WiFi Online]  ──► Sync NTP Clock ──► Cloud Uploads ──► [ThingSpeak and/or ThingsBoard]
 ```
 ---
 
@@ -138,11 +144,11 @@ This document outlines how the ESP32 Voltage Monitor responds to various network
 
 | Scenario | System State | Hardware Sampling Core (Core 1) | Network & Storage Core (Core 0) | Data Preservation | Recovery Action |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Normal Operation** | Online | Samples ADC every 10ms. Queues 15-second average voltage. | Translates data to absolute ISO 8601 UTC string. Pushes directly to ThingSpeak. | Real-time transmission. Local storage file remains empty. | N/A |
+| **Normal Operation** | Online | Samples ADC every 10ms. Queues 15-second average voltage. | Translates data to absolute timestamps and uploads to whichever cloud targets are enabled. | Real-time transmission. Local storage file remains empty. | N/A |
 | **WiFi Access Point Disconnected** | Offline | Continues uninterrupted 10ms sampling and 15s averaging. | Appends raw data structure to `/offline_data.bin` in LittleFS Flash memory. Initiates a non-blocking `WiFi.begin()` loop. | **100% Preserved** locally on internal flash memory. | Periodically checks WiFi status without stalling the system. |
-| **ThingSpeak Cloud Server Down** | Offline | Continues uninterrupted 10ms sampling and 15s averaging. | Detects HTTP failure code (not `202`). Closes network connection and leaves data intact within LittleFS. | **100% Preserved** locally on internal flash memory. | Retries transmission on the next 15-second loop iteration. |
+| **ThingSpeak or ThingsBoard Cloud Down** | Offline | Continues uninterrupted 10ms sampling and 15s averaging. | Detects failed HTTP response from the enabled cloud target(s). Leaves data intact within LittleFS. | **100% Preserved** locally on internal flash memory. | Retries transmission on the next 15-second loop iteration. |
 | **Power Loss during Offline Phase** | Critical Failure | Hardware turns off. | Hardware turns off. | **100% Preserved** up to the last completed 15-second mark. LittleFS is non-volatile. | On reboot, reads current NTP time. If internet is unavailable, constructs a reliable relative timeline based on internal milestones. |
-| **WiFi Connection Re-established** | Recovery | Continues uninterrupted 10ms sampling and 15s averaging. | Fetches real-world time via pool.ntp.org. Extracts up to 30 past data points from Flash, matches them to absolute time metrics, and sends a single bulk JSON POST. | **100% Recovered**. History is populated chronologically. | Deletes processed entries from the LittleFS binary file once HTTP `202 Accepted` is received. |
+| **WiFi Connection Re-established** | Recovery | Continues uninterrupted 10ms sampling and 15s averaging. | Fetches real-world time via pool.ntp.org. Extracts up to 30 past data points from Flash, matches them to absolute time metrics, and sends the batch to each enabled cloud target. | **100% Recovered**. History is populated chronologically. | Deletes processed entries from the LittleFS binary file after all enabled uploads succeed. |
 
 ---
 
@@ -157,7 +163,7 @@ The absolute stability of this fault tolerance architecture relies on FreeRTOS t
 
 ### Operational Notes
 
-- **Time handling & DST:** Configure the `timeZone` POSIX string in `CarBatteryMonitor.ino` to match your locale (examples are included in the source). The device calls `configTzTime()` and prints local timestamps on Serial with automatic daylight saving adjustments; however, all uploads to ThingSpeak are produced from UTC (`gmtime()`), ensuring consistent cloud timestamps.
+- **Time handling & DST:** Configure the `timeZone` POSIX string in `CarBatteryMonitor.ino` to match your locale (examples are included in the source). The device calls `configTzTime()` and prints local timestamps on Serial with automatic daylight saving adjustments; ThingSpeak uploads are produced from UTC (`gmtime()`), while ThingsBoard telemetry uses Unix milliseconds in the `ts` field.
 
 - **Fallback timestamps & correction on sync:** If the device boots without network/NTP, it stores measurements immediately to LittleFS using a sentinel fallback epoch (`FALLBACK_EPOCH = 1`) and keeps incrementing a local counter to preserve ordering. When NTP time becomes available, the firmware computes an offset and applies it only to placeholder-era records (those with timestamp < `MIN_VALID_EPOCH`, currently `1700000000`) so already-valid timestamps are not rebased. Corrected points are then uploaded in chronological order.
 
@@ -170,7 +176,7 @@ The absolute stability of this fault tolerance architecture relies on FreeRTOS t
     - Fast blink (~250 ms on/off): WiFi is connected but NTP time sync is pending.
     - Steady off: Device fully online (WiFi + NTP) and operating normally. During HTTP POST the LED briefly pulses HIGH to signal an upload in progress.
 
-- **Offline storage file:** The LittleFS binary buffer is stored at `/offline_data.bin`. Processed records are removed or truncated only after ThingSpeak returns `202 Accepted` for the bulk upload.
+- **Offline storage file:** The LittleFS binary buffer is stored at `/offline_data.bin`. Processed records are removed or truncated only after all enabled cloud uploads succeed.
 
 - **Where to change divider / ADC constants:** The voltage divider and ADC scaling constants are defined in `CarBatteryMonitor.ino` (look for `DIVIDER_RATIO` and the resistor value comments). For 12V systems the shipped values are `R1=330k, R2=47k`; for 24V systems use the suggested `R1=470k, R2=47k` alternative.
 
